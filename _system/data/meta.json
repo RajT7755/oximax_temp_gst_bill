@@ -48,9 +48,9 @@
     "showBusinessPhone": true,
     "showBusinessEmail": false
   },
-  "counter_INV": 4,
-  "counter_QUO": 1,
-  "counter_EST": 1,
-  "counter_COMP": 1,
-  "counter_RCP": 1
+  "counter_INV": 0,
+  "counter_QUO": 0,
+  "counter_EST": 0,
+  "counter_COMP": 0,
+  "counter_RCP": 0
 }
