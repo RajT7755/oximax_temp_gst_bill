@@ -1,0 +1,20 @@
+{
+  "framework": null,
+  "installCommand": "echo static dist",
+  "buildCommand": "echo static dist",
+  "outputDirectory": "_system/dist",
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://YOUR-RENDER-SERVICE.onrender.com/api/:path*"
+    },
+    {
+      "source": "/letterhead",
+      "destination": "https://YOUR-RENDER-SERVICE.onrender.com/letterhead"
+    },
+    {
+      "source": "/letterhead/:path*",
+      "destination": "https://YOUR-RENDER-SERVICE.onrender.com/letterhead/:path*"
+    }
+  ]
+}

@@ -1008,13 +1008,19 @@ export const formatDateGST = (dateStr) => {
 // the MRP (post-tax) value as taxable → the portal's own tax-consistency
 // check (`taxableValue + tax ≈ totInvValue`) failed → E-Way Bill rejected.
 export const generateEWayBillJSON = (profile, client, details, items, totals, invoiceType, opts = {}) => {
+  const cleanGstin = (value) => String(value || '').replace(/\s+/g, '').toUpperCase();
+  profile = { ...(profile || {}), gstin: cleanGstin(profile?.gstin) };
+  client = { ...(client || {}), gstin: cleanGstin(client?.gstin) };
+  details = details || {};
   if (profile?.country && profile.country !== 'India') {
     throw new Error('E-Way Bill is an Indian GST portal feature. Set business country to "India" in Settings to enable it.');
   }
   const taxInclusive = !!opts.taxInclusive;
   const fromStateCode = getStateCode(profile.state || profile.gstin);
   const toStateCode = getStateCode(client.state || client.gstin);
-  const isInterstate = fromStateCode && toStateCode && fromStateCode !== toStateCode;
+  const shipSame = details.shipToSameAsBilling !== false;
+  const shipStateCode = shipSame ? toStateCode : getStateCode(details.shippingState || client.state || client.gstin);
+  const isInterstate = !!(client.isSEZ || client.isSez) || !!(fromStateCode && toStateCode && fromStateCode !== toStateCode);
 
   // Pincodes are mandatory (the portal rejects 0). Try profile.pin / client.pin first,
   // then fall back to extracting digits from address. If still missing, throw — the user
@@ -1030,10 +1036,51 @@ export const generateEWayBillJSON = (profile, client, details, items, totals, in
   if (!fromPincode) throw new Error('Your business PIN code is required for the E-Way Bill. Set it in Settings → Company Details.');
   if (!toPincode) throw new Error("Client PIN code is required for the E-Way Bill. Add it in the client's address.");
 
+  // NIC e-Way Bill dates are dd/mm/yyyy. formatDateGST stays dd-mm-yyyy for GSTR.
+  const ewayDate = (value) => {
+    const match = String(value || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (match) return `${match[3]}/${match[2]}/${match[1]}`;
+    if (!value) return '';
+    const parsed = new Date(value);
+    if (isNaN(parsed.getTime())) return '';
+    const dd = String(parsed.getDate()).padStart(2, '0');
+    const mm = String(parsed.getMonth() + 1).padStart(2, '0');
+    return `${dd}/${mm}/${parsed.getFullYear()}`;
+  };
+  const portalPlace = (city, address) => {
+    const named = String(city || '').trim();
+    if (named) return named.slice(0, 50);
+    const text = String(address || '');
+    const district = text.match(/\bDIST(?:RICT)?\s*[-:]?\s*([A-Za-z]+)/i);
+    if (district) return district[1].toUpperCase().slice(0, 50);
+    const taluka = text.match(/\bTAL(?:UKA)?\s*[-:]?\s*([A-Za-z]+)/i);
+    return taluka ? taluka[1].toUpperCase().slice(0, 50) : '';
+  };
+  const portalAddress = (address, name) => {
+    let text = String(address || '').trim();
+    const prefix = String(name || '').trim().replace(/\.+$/, '');
+    if (prefix && text.toUpperCase().startsWith(prefix.toUpperCase())) {
+      text = text.slice(prefix.length).replace(/^[\s.,-]+/, '');
+    }
+    text = text.replace(/[^A-Za-z0-9\s,#/-]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (text.length <= 120) return text;
+    const cut = text.slice(0, 120);
+    const space = cut.lastIndexOf(' ');
+    return (space > 60 ? cut.slice(0, space) : cut).trim();
+  };
+  // A 3, 5, or 7 digit HSN lost a leading zero when it was stored as a number.
+  // 4021010 is 04021010. Keep the zero by returning a string. Other lengths stay as entered.
+  const portalHsn = (value) => {
+    const digits = String(value || '').replace(/\D/g, '');
+    if (!digits) return 0;
+    let code = digits;
+    if (code.length === 3 || code.length === 5 || code.length === 7) code = `0${code}`;
+    if ((code.length === 4 || code.length === 6 || code.length === 8) && code.startsWith('0')) return code;
+    if (code.length === 4 || code.length === 6 || code.length === 8) return Number(code);
+    return Number(digits) || 0;
+  };
+
   const itemList = items.map((item, idx) => {
-    // v1.10.1 — back-calculate taxable when the invoice is MRP-inclusive.
-    // v1.10.22 — honour discountType (percent | fixed).
-    // v1.10.31 — GST-C5: cess rate now populated per item (was 0).
     const gross = (Number(item.quantity) || 0) * (Number(item.rate) || 0) - resolveLineDiscount(item);
     const taxRate = Number(item.taxPercent) || 0;
     const cessRate = Number(item.cessPercent) || 0;
@@ -1044,7 +1091,7 @@ export const generateEWayBillJSON = (profile, client, details, items, totals, in
       itemNo: idx + 1,
       productName: item.name || '',
       productDesc: item.name || '',
-      hsnCode: Number(item.hsn) || 0,
+      hsnCode: portalHsn(item.hsn),
       quantity: item.quantity || 0,
       qtyUnit: getUnitUQC(item.unit),
       taxableAmount: Math.round(taxable * 100) / 100,
@@ -1055,51 +1102,59 @@ export const generateEWayBillJSON = (profile, client, details, items, totals, in
     };
   });
 
+  const distanceRaw = opts.distance || details.transDistance || details.distance;
+  const distanceNum = Number(distanceRaw);
+  const transDistance = (distanceRaw === undefined || distanceRaw === null || distanceRaw === '' || !Number.isFinite(distanceNum) || distanceNum <= 0)
+    ? '0'
+    : String(Math.min(3999, Math.round(distanceNum)));
+
+  const bill = {
+    userGstin: profile.gstin || '',
+    supplyType: 'O',
+    subSupplyType: '1',
+    docType: invoiceType === 'delivery-challan' ? 'CHL' : 'INV',
+    docNo: details.invoiceNumber || '',
+    docDate: ewayDate(details.invoiceDate),
+    fromGstin: profile.gstin || '',
+    fromTrdName: String(profile.businessName || '').slice(0, 100),
+    fromAddr1: portalAddress(profile.address, profile.businessName),
+    fromPlace: portalPlace(profile.city, profile.address),
+    fromPincode: fromPincode,
+    actFromStateCode: Number(fromStateCode) || 0,
+    fromStateCode: Number(fromStateCode) || 0,
+    toGstin: client.gstin || 'URP',
+    toTrdName: String(client.name || '').slice(0, 100),
+    toAddr1: portalAddress(client.address, client.name),
+    toPlace: portalPlace(client.city, client.address),
+    toPincode: toPincode,
+    actToStateCode: Number(shipStateCode || toStateCode) || 0,
+    toStateCode: Number(toStateCode) || 0,
+    transactionType: (!shipSame && shipStateCode && toStateCode && shipStateCode !== toStateCode) ? 2 : 1,
+    totalValue: Math.round(((totals.taxableAmount != null ? totals.taxableAmount : (totals.subtotal - totals.totalDiscount))) * 100) / 100,
+    cgstValue: Math.round((totals.cgst || 0) * 100) / 100,
+    sgstValue: Math.round(((totals.sgst || 0) + (totals.utgst || 0)) * 100) / 100,
+    igstValue: Math.round((totals.igst || 0) * 100) / 100,
+    cessValue: Math.round((totals.cess || 0) * 100) / 100,
+    totInvValue: Math.round(totals.total * 100) / 100,
+    transMode: '1',
+    transDistance,
+    vehicleType: 'R',
+    itemList,
+  };
+  const transporterName = String(details.dispatchedThrough || opts.transporterName || '').slice(0, 100);
+  if (transporterName) bill.transporterName = transporterName;
+  const transporterId = cleanGstin(details.transporterId || opts.transporterId || '');
+  if (/^[0-9]{2}[0-9A-Z]{13}$/.test(transporterId)) bill.transporterId = transporterId;
+  const transDocNo = String(details.dispatchDocNo || '').slice(0, 15);
+  if (transDocNo) bill.transDocNo = transDocNo;
+  const transDocDate = details.deliveryNoteDate ? ewayDate(details.deliveryNoteDate) : '';
+  if (transDocDate) bill.transDocDate = transDocDate;
+  const vehicleNo = String(details.vehicleNo || opts.vehicleNo || '').replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  if (vehicleNo.length >= 7 && vehicleNo.length <= 15) bill.vehicleNo = vehicleNo;
+
   return {
     version: '1.0.1221',
-    billLists: [{
-      userGstin: profile.gstin || '',
-      supplyType: 'O', // Outward — seller-issued. Always O regardless of intra/inter-state.
-      subSupplyType: 1, // 1=Supply
-      docType: invoiceType === 'delivery-challan' ? 'CHL' : 'INV',
-      docNo: details.invoiceNumber || '',
-      docDate: formatDateGST(details.invoiceDate),
-      fromGstin: profile.gstin || '',
-      fromAddr1: (profile.address || '').substring(0, 120),
-      fromPlace: profile.city || profile.state || '',
-      fromPincode: fromPincode,
-      fromStateCode: Number(fromStateCode) || 0,
-      toGstin: client.gstin || 'URP',
-      toAddr1: (client.address || '').substring(0, 120),
-      toPlace: client.city || client.state || '',
-      toPincode: toPincode,
-      toStateCode: Number(toStateCode) || 0,
-      // v1.10.1 — When tax-inclusive, subtotal is MRP-inclusive; the
-      // pre-tax totalValue must back out the embedded tax. Prefer
-      // totals.taxableAmount which computeInvoiceTotals fills correctly
-      // for both modes; fall back to the old calc for legacy callers.
-      totalValue: Math.round(((totals.taxableAmount != null ? totals.taxableAmount : (totals.subtotal - totals.totalDiscount))) * 100) / 100,
-      cgstValue: Math.round((totals.cgst || 0) * 100) / 100,
-      // v1.10.31 — GST-H7: UTGST folded into sgstValue bucket (NIC portal
-      // has no separate UTGST field; sum must reconcile with totInvValue).
-      sgstValue: Math.round(((totals.sgst || 0) + (totals.utgst || 0)) * 100) / 100,
-      igstValue: Math.round((totals.igst || 0) * 100) / 100,
-      // v1.10.31 — GST-C5: cess populated (was hardcoded 0 → NIC portal
-      // rejected any invoice with cess for total-consistency mismatch).
-      cessValue: Math.round((totals.cess || 0) * 100) / 100,
-      totInvValue: Math.round(totals.total * 100) / 100,
-      transMode: 1, // 1=Road
-      // v1.10.31 — GST-C5: distance must be >= 1 (portal rejects 0). Caller
-      // can pass `opts.distance`. If unset we default to 1 (minimum valid).
-      transDistance: Math.max(1, Number(opts.distance) || 1),
-      transporterName: '',
-      transporterId: '',
-      transDocNo: '',
-      transDocDate: '',
-      vehicleNo: '',
-      vehicleType: 'R', // R=Regular
-      itemList: itemList,
-    }]
+    billLists: [bill],
   };
 };
 

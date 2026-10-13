@@ -13,10 +13,25 @@ import { fileURLToPath } from 'url';
 // invoice-level discount, and round-off. Previously the recurring auto-fire
 // re-implemented totals inline and silently reintroduced every bug the
 // v1.10.1 extraction fixed. Same source of truth now.
-import { computeInvoiceTotals, clientYearToDate } from './src/utils.js';
+import { computeInvoiceTotals, clientYearToDate, generateEWayBillJSON } from './src/utils.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, 'data');
+const BUNDLED_DATA_DIR = path.join(__dirname, 'data');
+// Render mounts a disk and sets DATA_DIR to that mount. Local runs keep
+// using the data folder next to this file.
+const DATA_DIR = process.env.DATA_DIR
+  ? path.resolve(process.env.DATA_DIR)
+  : BUNDLED_DATA_DIR;
+
+// First boot on an empty disk copies the bundled profile and bills once.
+// A later deploy must not overwrite a disk that already has profile.json.
+function seedDataIfEmpty() {
+  if (path.resolve(DATA_DIR) === path.resolve(BUNDLED_DATA_DIR)) return;
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (fs.existsSync(path.join(DATA_DIR, 'profile.json'))) return;
+  fs.cpSync(BUNDLED_DATA_DIR, DATA_DIR, { recursive: true });
+}
+seedDataIfEmpty();
 
 // Port choice — we deliberately default to a high, unusual number rather than
 // the conventional 3001. The 3000-range is heavily used by every other Node /
@@ -28,7 +43,11 @@ const DATA_DIR = path.join(__dirname, 'data');
 // wins over this default — so a single user who genuinely needs 47371 for
 // something else can edit that file and we'll respect it forever.
 const DEFAULT_PORT = 47371;
-const PORT_FILE = path.join(__dirname, 'data', 'port.txt');
+const PORT_FILE = path.join(DATA_DIR, 'port.txt');
+// Render and other hosts set PORT. That is the switch for cloud mode:
+// listen on every interface, and do not scan the local 47371 range.
+const CLOUD = process.env.PORT != null && String(process.env.PORT).trim() !== '';
+const BIND_HOST = CLOUD ? '0.0.0.0' : '127.0.0.1';
 
 // Read the persisted port (if any) — written once on first successful start
 // and every time we get bumped off our preferred port by EADDRINUSE.
@@ -39,7 +58,7 @@ const persistedPort = (() => {
     return (isFinite(n) && n >= 1024 && n <= 65535) ? n : null;
   } catch { return null; }
 })();
-const STARTING_PORT = persistedPort || DEFAULT_PORT;
+const STARTING_PORT = CLOUD ? parseInt(process.env.PORT, 10) : (persistedPort || DEFAULT_PORT);
 const MAX_PORT_SCAN = 50; // 47371 → 47420 is enough headroom for any conceivable collision
 
 const app = express();
@@ -55,11 +74,19 @@ const app = express();
 // also localhost.
 app.use((req, res, next) => {
   const origin = req.headers.origin;
+  let originHost = '';
+  try { originHost = origin ? new URL(origin).host : ''; } catch { originHost = ''; }
+  const allowedOrigins = (process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map(value => value.trim())
+    .filter(Boolean);
   const allow =
     !origin ||
     /^https?:\/\/localhost(:\d+)?$/i.test(origin) ||
     /^https?:\/\/127\.0\.0\.1(:\d+)?$/i.test(origin) ||
-    /^https?:\/\/\[::1\](:\d+)?$/i.test(origin);
+    /^https?:\/\/\[::1\](:\d+)?$/i.test(origin) ||
+    (CLOUD && originHost && originHost === req.headers.host) ||
+    (CLOUD && allowedOrigins.includes(origin));
   if (!allow) {
     return res.status(403).json({ error: 'Cross-origin request refused' });
   }
@@ -83,7 +110,7 @@ const jsonBody = express.json({ limit: '5mb' });
 app.use((req, res, next) => (req.path === LOCAL_PREFS_ROUTE ? next() : jsonBody(req, res, next)));
 
 // Ensure data directory and sub-directories exist
-const DIRS = ['bills', 'clients', 'templates', 'products', 'expenses', 'recurring', 'receipts', 'profiles', 'purchases'];
+const DIRS = ['bills', 'clients', 'templates', 'products', 'expenses', 'recurring', 'receipts', 'profiles', 'purchases', 'eway'];
 for (const dir of DIRS) {
   const dirPath = path.join(DATA_DIR, dir);
   if (!fs.existsSync(dirPath)) fs.mkdirSync(dirPath, { recursive: true });
@@ -211,6 +238,76 @@ function deleteFile(filePath) {
 }
 
 // ========================
+// E-WAY BILL JSON (NIC schema 1.0.1221)
+// ========================
+function findBill(id) {
+  const want = String(id || '').trim();
+  if (!want) return null;
+  let decoded = want;
+  try { decoded = decodeURIComponent(want); } catch { decoded = want; }
+  const bills = readAllFromDir('bills');
+  return bills.find(bill =>
+    bill.id === decoded ||
+    bill.invoiceNumber === decoded ||
+    safeFileName(bill.id) === decoded ||
+    safeFileName(bill.invoiceNumber || '') === decoded
+  ) || null;
+}
+
+function ewayFileFor(bill) {
+  const num = bill.invoiceNumber || bill.data?.details?.invoiceNumber || bill.id || 'draft';
+  return path.join(DATA_DIR, 'eway', `EWB-${safeFileName(num)}.json`);
+}
+
+function writeEwayFile(bill) {
+  const data = bill.data || {};
+  const details = data.details || {};
+  const totals = data.totals || {};
+  const json = generateEWayBillJSON(
+    data.profile || {},
+    data.client || {},
+    details,
+    data.items || [],
+    totals,
+    data.invoiceType || bill.invoiceType || 'tax-invoice',
+    {
+      taxInclusive: !!totals.taxInclusive,
+      distance: details.transDistance || details.distance,
+    }
+  );
+  const filePath = ewayFileFor(bill);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  writeFileAtomic(filePath, JSON.stringify(json, null, 2));
+  return { json, filePath };
+}
+
+function sendEway(res, id) {
+  const bill = findBill(id);
+  if (!bill) return errRes(res, 404, 'not-found');
+  try {
+    const { json } = writeEwayFile(bill);
+    const num = bill.invoiceNumber || bill.id || 'draft';
+    res.setHeader('Content-Disposition', `attachment; filename="EWB-${safeFileName(num)}.json"`);
+    return res.type('json').send(JSON.stringify(json, null, 2));
+  } catch (err) {
+    return res.status(400).json({ error: err.message || 'Could not build the e-Way Bill file', code: 'bad-request' });
+  }
+}
+
+function refreshEwayFiles() {
+  try {
+    for (const bill of readAllFromDir('bills')) {
+      try { writeEwayFile(bill); } catch { /* skip a bill the portal file cannot describe yet */ }
+    }
+  } catch { /* ignore */ }
+}
+
+function removeEwayFile(bill) {
+  if (!bill) return;
+  try { fs.unlinkSync(ewayFileFor(bill)); } catch { /* already gone */ }
+}
+
+// ========================
 // BILLS
 // ========================
 app.get('/api/bills', (req, res) => {
@@ -237,7 +334,21 @@ app.post('/api/bills', (req, res) => {
     });
   }
   writeJSON(filePath, bill);
+  try { writeEwayFile(bill); } catch { /* a missing PIN must not block the save */ }
   res.json({ success: true });
+});
+
+app.get('/api/eway', (req, res) => {
+  const id = String(req.query.id || '');
+  if (!id) return errRes(res, 400, 'bad-request');
+  return sendEway(res, id);
+});
+
+app.get('/api/bills/{*id}/eway', (req, res) => {
+  const raw = req.params.id;
+  const id = Array.isArray(raw) ? raw.join('/') : String(raw || '');
+  if (!id) return errRes(res, 400, 'bad-request');
+  return sendEway(res, id);
 });
 
 // v1.10.31 — Data-F9.1: block deletion of a bill that's a client-credit
@@ -276,6 +387,7 @@ app.delete('/api/bills/:id', (req, res) => {
   const fname = safeFileName(req.params.id) + '.json';
   const filePath = path.join(DATA_DIR, 'bills', fname);
   if (!fs.existsSync(filePath)) return res.json({ success: true });
+  const existing = readJSON(filePath, null);
 
   // v1.10.31 — Data-F9.1: client-credit dependency check. Blocks silent
   // deletion of a credit source that would leave a paid-via-credit target
@@ -293,12 +405,14 @@ app.delete('/api/bills/:id', (req, res) => {
   }
   if (req.query.permanent === '1') {
     try { fs.unlinkSync(filePath); } catch { /* ignore */ }
+    removeEwayFile(existing);
     return res.json({ success: true, permanent: true });
   }
   try {
     const trashDir = path.join(DATA_DIR, 'trash');
     if (!fs.existsSync(trashDir)) fs.mkdirSync(trashDir, { recursive: true });
     fs.renameSync(filePath, path.join(trashDir, fname));
+    removeEwayFile(existing);
     res.json({ success: true, trashed: true });
   } catch (err) {
     errRes(res, 500, 'server-error', err);
@@ -1517,21 +1631,21 @@ process.on('unhandledRejection', (err) => logFatal(err, 'unhandledRejection'));
 // every byte stays on the user's machine, which the privacy promise depends on.
 let activeServer = null;
 function startServer(port) {
-  const server = app.listen(port, '127.0.0.1', () => {
+  const server = app.listen(port, BIND_HOST, () => {
     activeServer = server;
-    // Persist the chosen port — the .bat launcher reads this for the browser URL.
-    // Writing on EVERY successful boot means: if our preferred 47371 was busy and
-    // we landed on 47372 instead, next launch tries 47372 first (cuts collision
-    // scans in half on repeated reboots of whatever was holding 47371).
-    try { fs.writeFileSync(PORT_FILE, String(port), 'utf-8'); } catch { /* ignore */ }
+    // Persist the chosen port for the next local start. Cloud hosts assign
+    // PORT themselves, so that file is not the listen address there.
+    if (!CLOUD) {
+      try { fs.writeFileSync(PORT_FILE, String(port), 'utf-8'); } catch { /* ignore */ }
+    }
     console.log(`\n  Free GST Billing Software running at http://localhost:${port}`);
     console.log(`  Data stored in: ${DATA_DIR}\n`);
   });
   server.on('error', (err) => {
-    if (err.code === 'EADDRINUSE' && port < STARTING_PORT + MAX_PORT_SCAN) {
+    if (!CLOUD && err.code === 'EADDRINUSE' && port < STARTING_PORT + MAX_PORT_SCAN) {
       console.log(`  Port ${port} is busy, trying ${port + 1}...`);
       startServer(port + 1);
-    } else if (err.code === 'EADDRINUSE') {
+    } else if (!CLOUD && err.code === 'EADDRINUSE') {
       // We've exhausted the scan range. Tell the OS to pick anything free — at
       // this point the user has 50+ apps fighting for the 47371-47421 range,
       // which we treat as "do whatever works" rather than failing to start.
@@ -1800,6 +1914,7 @@ app.post('/api/recurring/:id/generate', (req, res) => {
   }
 });
 
+refreshEwayFiles();
 startServer(STARTING_PORT);
 // Fire once after a short delay so the listener is up first; then once a day
 // for users whose server stays up >24h.

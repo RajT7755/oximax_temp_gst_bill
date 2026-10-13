@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: oximax-gst-billing
+    runtime: node
+    rootDir: _system
+    buildCommand: npm install
+    startCommand: node server.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATA_DIR
+        value: /var/data
+      - key: ALLOWED_ORIGINS
+        sync: false
+    disk:
+      name: gst-data
+      mountPath: /var/data
+      sizeGB: 1
