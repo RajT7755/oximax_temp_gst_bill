@@ -1,0 +1,12 @@
+{
+  "name": "BUTTER",
+  "hsn": "9988",
+  "purchasePrice": 0,
+  "sellingPrice": 13,
+  "rate": 13,
+  "taxPercent": 5,
+  "unit": "Pcs",
+  "stock": 100000000,
+  "description": "BUTTER WITH BOX",
+  "id": "prod_1791823191975"
+}
