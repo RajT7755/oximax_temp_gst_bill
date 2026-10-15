@@ -8,8 +8,16 @@ const TITLES = {
   'bill-of-supply': 'BILL OF SUPPLY',
   composition: 'BILL OF SUPPLY',
   'credit-note': 'CREDIT NOTE',
-  'delivery-challan': 'DELIVERY CHALLAN',
+  'delivery-challan': 'DISPATCH CHALLAN',
 };
+
+const PERMANENT_LETTERHEAD = {
+  name: 'OXIMAX AGRITECH INDUSTRIES PVT. LTD',
+  address: 'GAT NO- 120/4 P, JAVKHEDE TISGAON-MIRI ROAD, TAL- PATHARDI, DIST - AHILYANAGAR. 414505',
+  gstin: '27AAECO8908J1Z0',
+  logo: '/letterhead-assets/logo.jpg',
+};
+const PERMANENT_TYPES = new Set(['tax-invoice', 'delivery-challan']);
 
 const DECLARATION = 'We declare that this invoice shows the actual price of the goods described and that all particulars are true and correct.';
 
@@ -163,7 +171,13 @@ export function renderLetterheadInvoice(bill) {
   let phone = String(profile.phone || '').trim();
   if (phone.startsWith('+91') && !phone.startsWith('+91 ')) phone = `+91 ${phone.slice(3).trim()}`;
   const logo = profile.logo && String(profile.logo).startsWith('data:') ? profile.logo : '';
-  const title = TITLES[data.invoiceType || bill.invoiceType] || 'TAX INVOICE';
+  const docType = data.invoiceType || bill.invoiceType || 'tax-invoice';
+  const permanent = PERMANENT_TYPES.has(docType);
+  const headName = permanent ? PERMANENT_LETTERHEAD.name : name;
+  const headAddress = permanent ? PERMANENT_LETTERHEAD.address : address;
+  const headGstin = permanent ? PERMANENT_LETTERHEAD.gstin : gstin;
+  const headLogo = permanent ? PERMANENT_LETTERHEAD.logo : logo;
+  const title = TITLES[docType] || 'TAX INVOICE';
   const invoiceNumber = details.invoiceNumber || bill.invoiceNumber || '';
   const invoiceDate = shortDate(details.invoiceDate || bill.invoiceDate);
   const sameShip = details.shipToSameAsBilling !== false && !details.shippingAddress;
@@ -254,11 +268,11 @@ export function renderLetterheadInvoice(bill) {
 <div class="page">
   <a class="back" href="/letterhead">All invoices</a>
   <header class="letterhead">
-    ${logo ? `<img src="${logo}" alt="">` : ''}
+    ${headLogo ? `<img src="${headLogo}" alt="">` : ''}
     <div class="text">
-      <div class="name">${esc(name)}</div>
-      <div class="addr">${esc(address)}</div>
-      ${gstin ? `<div class="gst">GSTIN: ${esc(gstin)}</div>` : ''}
+      <div class="name">${esc(headName)}</div>
+      <div class="addr">${esc(headAddress)}</div>
+      ${headGstin ? `<div class="gst">GSTIN: ${esc(headGstin)}</div>` : ''}
     </div>
   </header>
   <h1 class="title">${esc(title)}</h1>

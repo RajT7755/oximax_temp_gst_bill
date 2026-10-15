@@ -13,7 +13,8 @@ import { fileURLToPath } from 'url';
 // invoice-level discount, and round-off. Previously the recurring auto-fire
 // re-implemented totals inline and silently reintroduced every bug the
 // v1.10.1 extraction fixed. Same source of truth now.
-import { computeInvoiceTotals, clientYearToDate, generateEWayBillJSON } from './src/utils.js';
+import { computeInvoiceTotals, clientYearToDate } from './src/utils.js';
+import { generateEWayBillJSON, generateBulkEWayBillJSON, ewayProblems } from './src/eway-bill.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BUNDLED_DATA_DIR = path.join(__dirname, 'data');
@@ -238,7 +239,7 @@ function deleteFile(filePath) {
 }
 
 // ========================
-// E-WAY BILL JSON (NIC schema 1.0.1221)
+// E-WAY BILL JSON (bulk tool 1.0.0621, genMode Excel)
 // ========================
 function findBill(id) {
   const want = String(id || '').trim();
@@ -259,26 +260,75 @@ function ewayFileFor(bill) {
   return path.join(DATA_DIR, 'eway', `EWB-${safeFileName(num)}.json`);
 }
 
-function writeEwayFile(bill) {
-  const data = bill.data || {};
+function ewayInputFromBill(bill) {
+  const data = bill?.data || {};
   const details = data.details || {};
   const totals = data.totals || {};
-  const json = generateEWayBillJSON(
-    data.profile || {},
-    data.client || {},
+  const saved = data.eway || {};
+  return {
+    profile: data.profile || {},
+    client: data.client || {},
     details,
-    data.items || [],
+    items: data.items || [],
     totals,
-    data.invoiceType || bill.invoiceType || 'tax-invoice',
-    {
-      taxInclusive: !!totals.taxInclusive,
-      distance: details.transDistance || details.distance,
-    }
+    invoiceType: data.invoiceType || bill?.invoiceType || 'tax-invoice',
+    opts: {
+      ...saved,
+      taxInclusive: !!(saved.taxInclusive || totals.taxInclusive),
+      distance: saved.distance ?? details.transDistance ?? details.distance,
+    },
+  };
+}
+
+function writeEwayFile(bill) {
+  const input = ewayInputFromBill(bill);
+  const json = generateEWayBillJSON(
+    input.profile, input.client, input.details, input.items, input.totals, input.invoiceType, input.opts,
   );
   const filePath = ewayFileFor(bill);
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   writeFileAtomic(filePath, JSON.stringify(json, null, 2));
   return { json, filePath };
+}
+
+function ewayArgsFromBody(body) {
+  const opts = { ...(body?.opts || {}) };
+  if (body?.taxInclusive) opts.taxInclusive = true;
+  return {
+    profile: body?.profile || {},
+    client: body?.client || {},
+    details: body?.details || {},
+    items: Array.isArray(body?.items) ? body.items : [],
+    totals: body?.totals || {},
+    invoiceType: body?.invoiceType || 'tax-invoice',
+    opts,
+  };
+}
+
+function persistEwayChoices(billId, body) {
+  const bill = findBill(billId);
+  if (!bill) return false;
+  const data = bill.data || (bill.data = {});
+  data.eway = { ...(body?.opts || {}) };
+  if (body?.taxInclusive) data.eway.taxInclusive = true;
+  const cess = data.eway.cessNonAdvol;
+  if (Array.isArray(cess) && Array.isArray(data.items)) {
+    cess.forEach((n, i) => { if (data.items[i]) data.items[i].cessNonAdvol = Number(n) || 0; });
+  }
+  const details = data.details || (data.details = {});
+  const o = data.eway;
+  if (o.distance != null && o.distance !== '') details.transDistance = Number(o.distance);
+  if (o.vehicleNo != null) details.vehicleNo = o.vehicleNo;
+  if (o.transporterId != null) details.transporterId = o.transporterId;
+  if (o.transporterName != null) details.dispatchedThrough = o.transporterName;
+  if (o.transDocNo != null) details.dispatchDocNo = o.transDocNo;
+  if (o.transDocDate != null) {
+    const dmy = String(o.transDocDate).match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    details.deliveryNoteDate = dmy ? `${dmy[3]}-${dmy[2]}-${dmy[1]}` : o.transDocDate;
+  }
+  writeJSON(path.join(DATA_DIR, 'bills', safeFileName(bill.id) + '.json'), bill);
+  writeEwayFile(bill);
+  return true;
 }
 
 function sendEway(res, id) {
@@ -349,6 +399,67 @@ app.get('/api/bills/{*id}/eway', (req, res) => {
   const id = Array.isArray(raw) ? raw.join('/') : String(raw || '');
   if (!id) return errRes(res, 400, 'bad-request');
   return sendEway(res, id);
+});
+
+app.post('/api/eway/preview', (req, res) => {
+  try {
+    const input = ewayArgsFromBody(req.body);
+    const json = generateEWayBillJSON(
+      input.profile, input.client, input.details, input.items, input.totals, input.invoiceType,
+      { ...input.opts, allowIncomplete: true },
+    );
+    return res.json({ json, problems: ewayProblems(json) });
+  } catch (err) {
+    return res.status(400).json({ error: err.message || 'Could not prepare the e-Way Bill' });
+  }
+});
+
+app.post('/api/eway/build', (req, res) => {
+  try {
+    const input = ewayArgsFromBody(req.body);
+    const json = generateEWayBillJSON(
+      input.profile, input.client, input.details, input.items, input.totals, input.invoiceType, input.opts,
+    );
+    if (req.body?.billId) {
+      try { persistEwayChoices(req.body.billId, req.body); } catch { /* the download still returns */ }
+    }
+    const doc = json.billLists[0]?.docNo || 'draft';
+    res.setHeader('Content-Disposition', `attachment; filename="EWB-${safeFileName(doc)}.json"`);
+    return res.type('json').send(JSON.stringify(json, null, 2));
+  } catch (err) {
+    return res.status(400).json({ error: err.message || 'Could not build the e-Way Bill file' });
+  }
+});
+
+app.post('/api/eway/bulk', (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+  const ready = [];
+  const skipped = [];
+  for (const id of ids) {
+    const bill = findBill(id);
+    const label = bill?.invoiceNumber || bill?.data?.details?.invoiceNumber || String(id);
+    if (!bill) {
+      skipped.push({ id, invoiceNumber: label, error: 'Bill not found' });
+      continue;
+    }
+    const input = ewayInputFromBill(bill);
+    try {
+      generateEWayBillJSON(
+        input.profile, input.client, input.details, input.items, input.totals, input.invoiceType, input.opts,
+      );
+      ready.push(input);
+    } catch (err) {
+      skipped.push({ id, invoiceNumber: label, error: err.message || 'This bill cannot be included' });
+    }
+  }
+  if (!ready.length) {
+    return res.status(400).json({
+      error: 'None of the selected bills can go in the bulk file yet.',
+      skipped,
+    });
+  }
+  const file = generateBulkEWayBillJSON(ready);
+  return res.json({ file, filename: 'EWB-bulk.json', skipped });
 });
 
 // v1.10.31 — Data-F9.1: block deletion of a bill that's a client-credit
@@ -1216,7 +1327,15 @@ app.post('/api/control-panel/launch-script', async (req, res) => {
 // flips to serving the app the moment dist/ appears.
 const distPath = path.join(__dirname, 'dist');
 const indexPath = path.join(distPath, 'index.html');
-app.use(express.static(distPath, { fallthrough: true })); // fallthrough = ok if dist doesn't exist
+app.use(express.static(distPath, {
+  fallthrough: true, // ok if dist doesn't exist
+  setHeaders(res, filePath) {
+    // These two files are edited in place, so the browser must revalidate them.
+    if (filePath.endsWith(`${path.sep}letterhead-bridge.js`) || filePath.endsWith(`${path.sep}index-BbRVZVH8.js`)) {
+      res.setHeader('Cache-Control', 'no-cache');
+    }
+  },
+}));
 
 // ============================================================
 // v1.9.5 — Automatic daily backup + retention (keep last 30 days).
@@ -1499,6 +1618,16 @@ app.get('/api/health', (req, res) => {
     hasRecentErrors: !!errorsTail.trim(),
     errorsTail,
   });
+});
+
+app.get('/eway', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.sendFile(path.join(__dirname, 'eway-form.html'));
+});
+
+app.get('/letterhead-assets/logo.jpg', (req, res) => {
+  res.setHeader('Cache-Control', 'no-cache');
+  res.sendFile(path.join(__dirname, 'invoice-template', 'logo.jpg'));
 });
 
 // Letterhead invoice. The Tally grid stays as the app prints it; this page

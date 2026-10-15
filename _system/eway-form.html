@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>E-Way Bill</title>
+<style>
+  :root { color-scheme: light; --ink: #1e293b; --muted: #64748b; --line: #e2e8f0; --blue: #1d4ed8; --bg: #f8fafc; --bad: #b91c1c; --bad-bg: #fef2f2; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.45 "Segoe UI", system-ui, sans-serif; color: var(--ink); background: var(--bg); }
+  header, main { width: min(980px, calc(100% - 2rem)); margin: 0 auto; }
+  header { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-end; padding: 1.25rem 0 0.5rem; }
+  h1 { margin: 0; font-size: 1.45rem; }
+  h2 { margin: 0 0 0.75rem; font-size: 1.05rem; }
+  p.note { margin: 0.25rem 0 0; color: var(--muted); }
+  a { color: var(--blue); }
+  form, .card { background: #fff; border: 1px solid var(--line); border-radius: 12px; padding: 1rem 1rem 1.15rem; margin: 0.75rem 0 1.25rem; }
+  fieldset { border: 1px solid var(--line); border-radius: 10px; margin: 0 0 0.9rem; padding: 0.75rem; }
+  legend { padding: 0 0.35rem; font-weight: 650; }
+  .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.65rem 0.8rem; }
+  .span2 { grid-column: 1 / -1; }
+  label { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.82rem; color: var(--muted); }
+  input, select { font: inherit; color: var(--ink); border: 1px solid #cbd5e1; border-radius: 8px; padding: 0.45rem 0.55rem; background: #fff; width: 100%; }
+  input[readonly] { background: #f1f5f9; }
+  .row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.75rem; }
+  button { font: inherit; border-radius: 8px; border: 1px solid var(--blue); background: var(--blue); color: #fff; padding: 0.5rem 0.9rem; cursor: pointer; }
+  button.secondary { background: #fff; color: var(--blue); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  #problems, #skipped { margin: 0.4rem 0 0.8rem; padding-left: 1.15rem; color: var(--bad); }
+  #problems:empty, #skipped:empty { display: none; }
+  .banner { background: var(--bad-bg); border: 1px solid #fecaca; color: var(--bad); border-radius: 8px; padding: 0.6rem 0.75rem; margin: 0.6rem 0; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+  th, td { border-bottom: 1px solid var(--line); padding: 0.35rem; text-align: left; vertical-align: middle; }
+  th { color: var(--muted); font-weight: 600; }
+  .bulk-item { display: flex; gap: 0.5rem; align-items: baseline; padding: 0.3rem 0; }
+  @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } .span2 { grid-column: auto; } }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>E-Way Bill</h1>
+    <p class="note">Upload file version 1.0.0621, marked as the Excel bulk tool.</p>
+  </div>
+  <a href="/">Back to invoices</a>
+</header>
+<main>
+  <div class="card">
+    <div class="row">
+      <label style="min-width: 16rem">Saved bill
+        <select id="billPick"><option value="">Open invoice, or pick a saved bill</option></select>
+      </label>
+      <label style="min-width: 16rem">Saved client
+        <select id="clientPick"><option value="">Fill consignee from a saved client</option></select>
+      </label>
+    </div>
+    <p class="note" id="hint">Settings fill your business. An invoice fills the document, the items, and the tax. A saved client fills the consignee. Distance, vehicle, and the other transport fields are typed here, and you can correct any filled field.</p>
+    <div id="banner"></div>
+    <ul id="problems" role="alert"></ul>
+  </div>
+  <form id="ewb">
+    <fieldset>
+      <legend>Document</legend>
+      <div class="grid">
+        <label>Your GSTIN<input id="userGstin" readonly></label>
+        <label>Supply type
+          <select id="supplyType"><option value="O">Outward</option><option value="I">Inward</option></select>
+        </label>
+        <label>Sub supply type<select id="subSupplyType"></select></label>
+        <label>Sub supply description<input id="subSupplyDesc" maxlength="100"></label>
+        <label>Document type
+          <select id="docType">
+            <option value="INV">Tax invoice</option>
+            <option value="BIL">Bill of supply</option>
+            <option value="BOE">Bill of entry</option>
+            <option value="CHL">Delivery challan</option>
+            <option value="OTH">Others</option>
+          </select>
+        </label>
+        <label>Document number<input id="docNo" maxlength="16"></label>
+        <label>Document date<input id="docDate" type="date"></label>
+        <label>Transaction type<select id="transType"></select></label>
+      </div>
+      <p class="note" style="margin-top:0.7rem"><button type="button" class="secondary" id="swapParties">Swap from and to</button> Use this when the supply is inward, so your GSTIN is the consignee.</p>
+    </fieldset>
+    <fieldset>
+      <legend>Consignor (from)</legend>
+      <p class="note">For Bill From – Dispatch From, the GSTIN and state are the bill-from party. Address, place, PIN and dispatch state are where the goods leave from.</p>
+      <div class="grid">
+        <label>Trade name<input id="fromTrdName" maxlength="100"></label>
+        <label>GSTIN<input id="fromGstin" maxlength="15"></label>
+        <label class="span2">Address line 1<input id="fromAddr1" maxlength="120"></label>
+        <label class="span2">Address line 2<input id="fromAddr2" maxlength="120"></label>
+        <label>Place<input id="fromPlace" maxlength="50"></label>
+        <label>PIN<input id="fromPincode" inputmode="numeric" maxlength="6"></label>
+        <label>State<select id="fromStateCode"></select></label>
+        <label>Dispatch state<select id="actualFromStateCode"></select></label>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>Consignee (to)</legend>
+      <p class="note">For Bill To – Ship To, the GSTIN, trade name and state are the bill-to party. Address, place, PIN and ship-to state are where the goods are delivered.</p>
+      <div class="grid">
+        <label>Trade name<input id="toTrdName" maxlength="100"></label>
+        <label>GSTIN<input id="toGstin" maxlength="15"></label>
+        <label class="span2">Address line 1<input id="toAddr1" maxlength="120"></label>
+        <label class="span2">Address line 2<input id="toAddr2" maxlength="120"></label>
+        <label>Place<input id="toPlace" maxlength="50"></label>
+        <label>PIN<input id="toPincode" inputmode="numeric" maxlength="6"></label>
+        <label>State<select id="toStateCode"></select></label>
+        <label>Ship-to state<select id="actualToStateCode"></select></label>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>Values</legend>
+      <div class="grid">
+        <label>Taxable value<input id="totalValue" readonly></label>
+        <label>CGST<input id="cgstValue" readonly></label>
+        <label>SGST<input id="sgstValue" readonly></label>
+        <label>IGST<input id="igstValue" readonly></label>
+        <label>Cess<input id="cessValue" readonly></label>
+        <label>Non-advol cess total<input id="TotNonAdvolVal" readonly></label>
+        <label>Other charges<input id="OthValue" readonly></label>
+        <label>Invoice total<input id="totInvValue" readonly></label>
+        <label>Main HSN<input id="mainHsnCode" readonly></label>
+      </div>
+    </fieldset>
+    <fieldset>
+      <legend>Items</legend>
+      <table>
+        <thead><tr><th>#</th><th>Name</th><th>HSN</th><th>Qty</th><th>Unit</th><th>Taxable</th><th>Non-advol cess</th></tr></thead>
+        <tbody id="items"></tbody>
+      </table>
+    </fieldset>
+    <fieldset>
+      <legend>Transport</legend>
+      <div class="grid">
+        <label>Mode
+          <select id="transMode">
+            <option value="1">Road</option>
+            <option value="2">Rail</option>
+            <option value="3">Air</option>
+            <option value="4">Ship / road cum ship</option>
+          </select>
+        </label>
+        <label>Distance (km)<input id="transDistance" inputmode="numeric"></label>
+        <label>Transporter name<input id="transporterName" maxlength="25"></label>
+        <label>Transporter GSTIN<input id="transporterId" maxlength="15"></label>
+        <label>Transport doc number<input id="transDocNo" maxlength="16"></label>
+        <label>Transport doc date<input id="transDocDate" type="date"></label>
+        <label>Vehicle number<input id="vehicleNo" maxlength="15"></label>
+        <label>Vehicle type
+          <select id="vehicleType"><option value="R">Regular</option><option value="O">Over dimensional cargo</option></select>
+        </label>
+      </div>
+    </fieldset>
+    <button id="download" type="button" disabled>Download JSON</button>
+  </form>
+  <section class="card">
+    <h2>Bulk JSON</h2>
+    <p class="note">Selected saved bills go into one file with the same bill shape. A bill that fails the checks is left out and named below.</p>
+    <div id="bulkList"></div>
+    <button id="bulkDownload" type="button" class="secondary">Download bulk JSON</button>
+    <ul id="skipped"></ul>
+  </section>
+</main>
+<script>
+const STATES = [[1,'Jammu and Kashmir'],[2,'Himachal Pradesh'],[3,'Punjab'],[4,'Chandigarh'],[5,'Uttarakhand'],[6,'Haryana'],[7,'Delhi'],[8,'Rajasthan'],[9,'Uttar Pradesh'],[10,'Bihar'],[11,'Sikkim'],[12,'Arunachal Pradesh'],[13,'Nagaland'],[14,'Manipur'],[15,'Mizoram'],[16,'Tripura'],[17,'Meghalaya'],[18,'Assam'],[19,'West Bengal'],[20,'Jharkhand'],[21,'Odisha'],[22,'Chhattisgarh'],[23,'Madhya Pradesh'],[24,'Gujarat'],[26,'Dadra and Nagar Haveli and Daman and Diu'],[27,'Maharashtra'],[29,'Karnataka'],[30,'Goa'],[31,'Lakshadweep'],[32,'Kerala'],[33,'Tamil Nadu'],[34,'Puducherry'],[35,'Andaman and Nicobar Islands'],[36,'Telangana'],[37,'Andhra Pradesh'],[38,'Ladakh'],[97,'Other Territory'],[99,'Other Country']];
+const SUBS = [[1,'Supply'],[2,'Import'],[3,'Export'],[4,'Job work'],[5,'For own use'],[6,'Job work returns'],[7,'Sales return'],[8,'Others'],[9,'SKD/CKD/Lots'],[10,'Line sales'],[11,'Recipient not known'],[12,'Exhibition or fairs']];
+const TRANS = [[1,'Regular'],[2,'Bill to – ship to'],[3,'Bill from – dispatch from']];
+const UQC = ['BAG','BAL','BDL','BKL','BOU','BOX','BTL','BUN','CAN','CBM','CCM','CMS','CTN','DOZ','DRM','GGK','GMS','GRS','GYD','KGS','KLR','KME','LTR','MLT','MTR','MTS','NOS','OTH','PAC','PCS','PRS','QTL','ROL','SET','SQF','SQM','SQY','TBS','TGM','THD','TON','TUB','UGS','UNT','YDS'];
+const $ = (id) => document.getElementById(id);
+let source = null;
+let bills = [];
+let clients = [];
+let company = {};
+let filling = false;
+let timer = 0;
+
+function filled(value) {
+  return value != null && String(value).trim() !== '';
+}
+
+function sellerProfile(saved) {
+  const live = company || {};
+  const base = saved || {};
+  const pick = (key) => (filled(live[key]) ? live[key] : base[key]);
+  const pin = pick('pin') || pick('pincode') || '';
+  return {
+    ...base,
+    businessName: pick('businessName') || pick('name') || '',
+    gstin: pick('gstin') || '',
+    address: pick('address') || '',
+    city: pick('city') || '',
+    state: pick('state') || '',
+    pin,
+    pincode: pin,
+    country: pick('country') || '',
+  };
+}
+
+function stateCodeOf(record) {
+  const gstin = String(record?.gstin || '').replace(/\s+/g, '').toUpperCase();
+  const fromGstin = gstin.match(/^(\d{2})/);
+  if (fromGstin) {
+    const n = Number(fromGstin[1]);
+    if (STATES.some(([code]) => code === n)) return String(n);
+  }
+  const name = String(record?.state || '').trim().toLowerCase();
+  const hit = STATES.find(([, label]) => label.toLowerCase() === name);
+  return hit ? String(hit[0]) : '';
+}
+
+function pinOf(record) {
+  const direct = String(record?.pin || record?.pincode || '').replace(/\D/g, '');
+  if (direct.length >= 6) return direct.slice(0, 6);
+  const fromAddr = String(record?.address || '').match(/\b(\d{6})\b/);
+  return fromAddr ? fromAddr[1] : '';
+}
+
+function splitAddr(address) {
+  const text = String(address || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= 120) return [text, ''];
+  const cut = text.slice(0, 120);
+  const space = cut.lastIndexOf(' ');
+  const line1 = (space > 40 ? cut.slice(0, space) : cut).trim();
+  return [line1, text.slice(line1.length).trim().slice(0, 120)];
+}
+
+function applyParty(side, record) {
+  const [line1, line2] = splitAddr(record?.address);
+  const code = stateCodeOf(record);
+  const gstin = String(record?.gstin || '').replace(/\s+/g, '').toUpperCase();
+  filling = true;
+  setVal(side + 'Gstin', side === 'to' ? (gstin || 'URP') : gstin);
+  setVal(side + 'TrdName', record?.businessName || record?.name || '');
+  setVal(side + 'Addr1', line1);
+  setVal(side + 'Addr2', line2);
+  setVal(side + 'Place', record?.city || '');
+  setVal(side + 'Pincode', pinOf(record));
+  if (code) {
+    setVal(side + 'StateCode', code);
+    setVal(side === 'from' ? 'actualFromStateCode' : 'actualToStateCode', code);
+  }
+  if (side === 'from') setVal('userGstin', gstin);
+  filling = false;
+}
+
+function fillSelect(id, pairs) {
+  const el = $(id);
+  el.innerHTML = pairs.map(([v, n]) => `<option value="${v}">${n}</option>`).join('');
+}
+fillSelect('subSupplyType', SUBS);
+fillSelect('transType', TRANS);
+for (const id of ['fromStateCode','actualFromStateCode','toStateCode','actualToStateCode']) fillSelect(id, STATES);
+
+function setVal(id, value) {
+  const el = $(id);
+  if (el) el.value = value == null ? '' : String(value);
+}
+
+function toCalendarDate(value) {
+  const text = String(value || '').trim();
+  const slash = text.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if (slash) return `${slash[3]}-${slash[2]}-${slash[1]}`;
+  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return iso ? iso[0] : '';
+}
+
+function readOpts() {
+  const cess = [...document.querySelectorAll('[data-cess]')].map((el) => el.value);
+  const hsnCodes = [...document.querySelectorAll('[data-hsn]')].map((el) => el.value);
+  const qtyUnits = [...document.querySelectorAll('[data-unit]')].map((el) => el.value);
+  return {
+    taxInclusive: !!(source && source.taxInclusive),
+    supplyType: $('supplyType').value,
+    subSupplyType: Number($('subSupplyType').value),
+    subSupplyDesc: $('subSupplyDesc').value,
+    docType: $('docType').value,
+    docNo: $('docNo').value,
+    docDate: $('docDate').value,
+    transType: Number($('transType').value),
+    from: {
+      gstin: $('fromGstin').value, trdName: $('fromTrdName').value,
+      addr1: $('fromAddr1').value, addr2: $('fromAddr2').value,
+      place: $('fromPlace').value, pincode: $('fromPincode').value,
+      stateCode: $('fromStateCode').value, actualStateCode: $('actualFromStateCode').value,
+    },
+    to: {
+      gstin: $('toGstin').value, trdName: $('toTrdName').value,
+      addr1: $('toAddr1').value, addr2: $('toAddr2').value,
+      place: $('toPlace').value, pincode: $('toPincode').value,
+      stateCode: $('toStateCode').value, actualStateCode: $('actualToStateCode').value,
+    },
+    transMode: Number($('transMode').value),
+    distance: $('transDistance').value,
+    transporterName: $('transporterName').value,
+    transporterId: $('transporterId').value,
+    transDocNo: $('transDocNo').value,
+    transDocDate: $('transDocDate').value,
+    vehicleNo: $('vehicleNo').value,
+    vehicleType: $('vehicleType').value,
+    cessNonAdvol: cess,
+    hsnCodes,
+    qtyUnits,
+  };
+}
+
+function requestBody(withOpts) {
+  return { ...(source || {}), opts: withOpts ? readOpts() : (source && source.opts) || undefined };
+}
+
+function showProblems(list) {
+  const ul = $('problems');
+  ul.innerHTML = '';
+  (list || []).forEach((text) => {
+    const li = document.createElement('li');
+    li.textContent = text;
+    ul.appendChild(li);
+  });
+  $('download').disabled = !source || (list || []).length > 0;
+}
+
+function renderItems(items) {
+  const body = $('items');
+  body.innerHTML = '';
+  (items || []).forEach((item) => {
+    const tr = document.createElement('tr');
+    const unit = document.createElement('select');
+    unit.dataset.unit = '1';
+    UQC.forEach((code) => {
+      const opt = document.createElement('option');
+      opt.value = code;
+      opt.textContent = code;
+      unit.appendChild(opt);
+    });
+    unit.value = UQC.includes(item.qtyUnit) ? item.qtyUnit : 'NOS';
+    const hsn = document.createElement('input');
+    hsn.dataset.hsn = '1';
+    hsn.value = item.hsnCode || '';
+    hsn.maxLength = 8;
+    const cess = document.createElement('input');
+    cess.dataset.cess = '1';
+    cess.inputMode = 'decimal';
+    cess.value = item.cessNonAdvol || 0;
+    const cells = [item.itemNo, item.productName, hsn, item.quantity, unit, item.taxableAmount, cess];
+    cells.forEach((cell) => {
+      const td = document.createElement('td');
+      if (cell instanceof Node) td.appendChild(cell);
+      else td.textContent = cell == null ? '' : String(cell);
+      tr.appendChild(td);
+    });
+    body.appendChild(tr);
+  });
+}
+
+function fill(json) {
+  const bill = json.billLists[0];
+  filling = true;
+  ['userGstin','supplyType','subSupplyType','subSupplyDesc','docType','docNo','docDate','transType','fromGstin','fromTrdName','fromAddr1','fromAddr2','fromPlace','fromPincode','fromStateCode','actualFromStateCode','toGstin','toTrdName','toAddr1','toAddr2','toPlace','toPincode','toStateCode','actualToStateCode','totalValue','cgstValue','sgstValue','igstValue','cessValue','TotNonAdvolVal','OthValue','totInvValue','transMode','transDistance','transporterName','transporterId','transDocNo','transDocDate','vehicleNo','vehicleType','mainHsnCode'].forEach((key) => {
+    let value = bill[key];
+    if ((key === 'fromPincode' || key === 'toPincode' || key === 'transDistance') && (value === 0 || value === '0')) value = '';
+    if (key === 'docDate' || key === 'transDocDate') value = toCalendarDate(value);
+    setVal(key, value);
+  });
+  renderItems(bill.itemList);
+  filling = false;
+}
+
+function applyComputed(json) {
+  const bill = json.billLists[0];
+  filling = true;
+  ['totalValue','cgstValue','sgstValue','igstValue','cessValue','TotNonAdvolVal','OthValue','totInvValue','mainHsnCode','userGstin'].forEach((key) => setVal(key, bill[key]));
+  (bill.itemList || []).forEach((item, i) => {
+    const row = $('items').rows[i];
+    if (row) row.cells[5].textContent = item.taxableAmount;
+  });
+  filling = false;
+}
+
+async function preview(refill) {
+  if (!source) return;
+  const res = await fetch('/api/eway/preview', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(refill ? { ...source, opts: source.opts } : requestBody(true)),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    $('banner').innerHTML = '';
+    const div = document.createElement('div');
+    div.className = 'banner';
+    div.textContent = data.error || 'Could not prepare the e-Way Bill';
+    $('banner').appendChild(div);
+    showProblems([]);
+    $('download').disabled = true;
+    return;
+  }
+  $('banner').innerHTML = '';
+  if (refill) fill(data.json);
+  else applyComputed(data.json);
+  showProblems(data.problems);
+}
+
+function schedule() {
+  if (filling) return;
+  clearTimeout(timer);
+  timer = setTimeout(() => preview(false), 350);
+}
+
+function sourceFromBill(bill) {
+  const data = bill.data || {};
+  return {
+    billId: bill.id || bill.invoiceNumber || '',
+    profile: data.profile || {},
+    client: data.client || {},
+    details: data.details || {},
+    items: data.items || [],
+    totals: data.totals || {},
+    invoiceType: data.invoiceType || bill.invoiceType || 'tax-invoice',
+    taxInclusive: !!((data.eway && data.eway.taxInclusive) || (data.totals && data.totals.taxInclusive)),
+    opts: data.eway || undefined,
+  };
+}
+
+function renderBulk() {
+  const box = $('bulkList');
+  box.innerHTML = '';
+  if (!bills.length) {
+    const p = document.createElement('p');
+    p.className = 'note';
+    p.textContent = 'No saved bills yet.';
+    box.appendChild(p);
+    return;
+  }
+  bills.forEach((bill) => {
+    const label = document.createElement('label');
+    label.className = 'bulk-item';
+    const boxIn = document.createElement('input');
+    boxIn.type = 'checkbox';
+    boxIn.value = bill.id || bill.invoiceNumber || '';
+    const name = bill.invoiceNumber || bill.data?.details?.invoiceNumber || bill.id || 'Bill';
+    const client = bill.data?.client?.name || bill.clientName || '';
+    const text = document.createElement('span');
+    text.textContent = client ? `${name} — ${client}` : name;
+    label.appendChild(boxIn);
+    label.appendChild(text);
+    box.appendChild(label);
+  });
+}
+
+function saveBlob(filename, obj) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+$('ewb').addEventListener('input', schedule);
+$('ewb').addEventListener('change', schedule);
+$('swapParties').addEventListener('click', () => {
+  const pairs = [['fromGstin','toGstin'],['fromTrdName','toTrdName'],['fromAddr1','toAddr1'],['fromAddr2','toAddr2'],['fromPlace','toPlace'],['fromPincode','toPincode'],['fromStateCode','toStateCode'],['actualFromStateCode','actualToStateCode']];
+  filling = true;
+  pairs.forEach(([a, b]) => { const hold = $(a).value; $(a).value = $(b).value; $(b).value = hold; });
+  filling = false;
+  preview(false);
+});
+$('billPick').addEventListener('change', () => {
+  const bill = bills.find((item) => (item.id || item.invoiceNumber) === $('billPick').value);
+  if (!bill) return;
+  source = sourceFromBill(bill);
+  source.profile = sellerProfile(source.profile);
+  $('clientPick').value = '';
+  preview(true);
+});
+$('clientPick').addEventListener('change', () => {
+  const client = clients.find((item) => item.id === $('clientPick').value);
+  if (!client) return;
+  applyParty('to', client);
+  if (!source) return;
+  source.client = client;
+  preview(false);
+});
+$('download').addEventListener('click', async () => {
+  await preview(false);
+  if ($('download').disabled) return;
+  const res = await fetch('/api/eway/build', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(requestBody(true)),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    showProblems(String(data.error || 'Could not build the file').split('\n'));
+    return;
+  }
+  const json = await res.json();
+  const match = (res.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/);
+  saveBlob(match ? match[1] : 'EWB.json', json);
+});
+$('bulkDownload').addEventListener('click', async () => {
+  const ids = [...document.querySelectorAll('#bulkList input:checked')].map((el) => el.value);
+  const skipped = $('skipped');
+  skipped.innerHTML = '';
+  if (!ids.length) {
+    const li = document.createElement('li');
+    li.textContent = 'Select at least one saved bill.';
+    skipped.appendChild(li);
+    return;
+  }
+  const res = await fetch('/api/eway/bulk', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids }),
+  });
+  const data = await res.json();
+  (data.skipped || []).forEach((row) => {
+    const li = document.createElement('li');
+    li.textContent = `${row.invoiceNumber}: ${row.error}`;
+    skipped.appendChild(li);
+  });
+  if ((!data.skipped || !data.skipped.length) && data.error) {
+    const li = document.createElement('li');
+    li.textContent = data.error;
+    skipped.appendChild(li);
+  }
+  if (!res.ok || !data.file) return;
+  saveBlob(data.filename || 'EWB-bulk.json', data.file);
+});
+
+function addOption(select, value, text) {
+  const opt = document.createElement('option');
+  opt.value = value;
+  opt.textContent = text;
+  select.appendChild(opt);
+}
+
+async function start() {
+  try {
+    const raw = sessionStorage.getItem('ewb-draft');
+    if (raw) source = JSON.parse(raw);
+  } catch { source = null; }
+  try {
+    company = await (await fetch('/api/profile')).json();
+    if (!company || typeof company !== 'object') company = {};
+  } catch { company = {}; }
+  try {
+    clients = await (await fetch('/api/clients')).json();
+    if (!Array.isArray(clients)) clients = [];
+  } catch { clients = []; }
+  try {
+    bills = await (await fetch('/api/bills')).json();
+    if (!Array.isArray(bills)) bills = [];
+  } catch { bills = []; }
+  const pick = $('billPick');
+  bills.forEach((bill) => {
+    const name = bill.invoiceNumber || bill.data?.details?.invoiceNumber || bill.id || 'Bill';
+    const client = bill.data?.client?.name || '';
+    addOption(pick, bill.id || bill.invoiceNumber || '', client ? `${name} — ${client}` : name);
+  });
+  clients.forEach((client) => {
+    const name = client.name || client.id || 'Client';
+    const gstin = client.gstin ? ` — ${client.gstin}` : '';
+    addOption($('clientPick'), client.id || '', name + gstin);
+  });
+  renderBulk();
+  if (source) {
+    source.profile = sellerProfile(source.profile);
+    if (source.billId) pick.value = source.billId;
+    await preview(true);
+  } else {
+    applyParty('from', company);
+    if (!bills.length) {
+      const div = document.createElement('div');
+      div.className = 'banner';
+      div.textContent = 'Open an invoice and click E-Way Bill, or save a bill and pick it here. Your business details are already filled from Settings.';
+      $('banner').appendChild(div);
+    }
+  }
+}
+start();
+</script>
+</body>
+</html>
